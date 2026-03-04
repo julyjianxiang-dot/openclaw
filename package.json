@@ -242,9 +242,6 @@
   "optionalDependencies": {
     "@discordjs/opus": "^0.10.0"
   },
-  "engines": {
-    "node": ">=22.12.0"
-  },
   "packageManager": "pnpm@10.23.0",
   "pnpm": {
     "minimumReleaseAge": 2880,

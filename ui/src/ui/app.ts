@@ -1,4 +1,4 @@
-import { LitElement } from "lit";
+import { LitElement, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { i18n, I18nController, isSupportedLocale } from "../i18n/index.ts";
 import {
@@ -119,6 +119,12 @@ export class OpenClawApp extends LitElement {
     }
   }
   @state() password = "";
+  // Login state
+  @state() loggedIn = false;
+  @state() loginLoading = false;
+  @state() loginError: string | null = null;
+  @state() loginUsername = "";
+  @state() loginPassword = "";
   @state() tab: Tab = "chat";
   @state() onboarding = resolveOnboardingMode();
   @state() connected = false;
@@ -400,6 +406,8 @@ export class OpenClawApp extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Load existing user (if any) but do not block lifecycle. UI will gate against loggedIn.
+    void this.loadUser();
     handleConnected(this as unknown as Parameters<typeof handleConnected>[0]);
   }
 
@@ -418,6 +426,224 @@ export class OpenClawApp extends LitElement {
 
   connect() {
     connectGatewayInternal(this as unknown as Parameters<typeof connectGatewayInternal>[0]);
+  }
+
+  // Load user from dev-server API which uses token-based sessions.
+  async loadUser() {
+    try {
+      const token = localStorage.getItem("openclaw_session_token");
+      if (!token) {
+        this.loggedIn = false;
+        return;
+      }
+      const res = await fetch(`/api/user`, { method: "GET", headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        this.loggedIn = false;
+        return;
+      }
+      const json = await res.json();
+      if (json && typeof json.username === "string" && json.username.trim()) {
+        this.loginUsername = json.username;
+        this.loggedIn = true;
+      } else {
+        this.loggedIn = false;
+      }
+    } catch (err) {
+      this.loggedIn = false;
+    }
+  }
+
+  async doLogin() {
+    this.loginError = null;
+    if (!this.loginUsername.trim()) {
+      this.loginError = "请输入用户名";
+      return;
+    }
+    this.loginLoading = true;
+    try {
+      // Compute SHA-256 hash of password in browser and send passwordHash to avoid plaintext transmission
+      const encoder = new TextEncoder();
+      const pwBytes = encoder.encode(this.loginPassword || "");
+      const digest = await crypto.subtle.digest("SHA-256", pwBytes);
+      const hashArray = Array.from(new Uint8Array(digest));
+      const passwordHash = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+
+      const res = await fetch(`/api/user`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: this.loginUsername, passwordHash }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        this.loginError = `登录失败: ${text || res.status}`;
+        this.loggedIn = false;
+        return;
+      }
+      const body = await res.json();
+      const token = body?.token;
+      if (typeof token === "string" && token) {
+        localStorage.setItem("openclaw_session_token", token);
+        this.loggedIn = true;
+        this.loginPassword = "";
+      } else {
+        this.loginError = "登录失败: 未返回会话令牌";
+        this.loggedIn = false;
+      }
+    } catch (err) {
+      this.loginError = `登录失败: ${String(err)}`;
+      this.loggedIn = false;
+    } finally {
+      this.loginLoading = false;
+    }
+  }
+
+  async doLogout() {
+    try {
+      const token = localStorage.getItem("openclaw_session_token");
+      if (token) {
+        await fetch(`/api/user`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      }
+    } catch {
+      // ignore
+    }
+    localStorage.removeItem("openclaw_session_token");
+    this.loggedIn = false;
+    this.loginUsername = "";
+    this.loginPassword = "";
+  }
+
+  // Render gating: show simple login screen until logged in. Keep single render implementation.
+  render() {
+    if (!this.loggedIn) {
+      return html`
+        <style>
+          /* Ensure page and component fill viewport */
+          html, body, openclaw-app { height: 100%; margin: 0; }
+          :root { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+          .oc-login-shell {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(ellipse at center, rgba(6,10,18,1) 0%, rgba(4,6,10,1) 60%), linear-gradient(180deg,#021028 0%, #001018 100%);
+            color: #e6eef8;
+            overflow: hidden;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+          }
+          .oc-login-grid {
+            position: absolute;
+            inset: -10%;
+            background-image: radial-gradient(rgba(0,150,255,0.04) 1px, transparent 1px);
+            background-size: 40px 40px;
+            opacity: 0.7;
+            transform: translateZ(0);
+            mix-blend-mode: screen;
+            animation: grid-move 30s linear infinite;
+            pointer-events: none;
+          }
+          @keyframes grid-move { from { transform: translateY(0); } to { transform: translateY(-120px); } }
+          .oc-login-card {
+            position: relative;
+            width: 420px;
+            max-width: calc(100% - 40px);
+            padding: 28px;
+            border-radius: 12px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));
+            box-shadow: 0 10px 30px rgba(3,10,20,0.6), inset 0 1px 0 rgba(255,255,255,0.02);
+            border: 1px solid rgba(100,200,255,0.06);
+            backdrop-filter: blur(6px) saturate(120%);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 2;
+          }
+          .oc-brand {
+            display:flex;align-items:center;gap:12px;margin-bottom:4px
+          }
+          .oc-brand .logo {
+            width:40px;height:40px;border-radius:8px;background:linear-gradient(135deg,#00c8ff,#6e00ff);box-shadow:0 6px 18px rgba(0,200,255,0.12), inset 0 -6px 18px rgba(255,255,255,0.02);
+            display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px
+          }
+          .oc-title {font-size:18px;font-weight:600;letter-spacing:0.6px}
+          .oc-sub {font-size:12px;color:rgba(230,238,248,0.6)}
+          .oc-field {display:flex;flex-direction:column;gap:6px}
+          .oc-field input {background:rgba(5,10,16,0.6);border:1px solid rgba(100,200,255,0.06);padding:10px 12px;border-radius:8px;color:#e6eef8;outline:none}
+          /* Remove focus highlight and glowing outline */
+          .oc-field input:focus,
+          .oc-field input:focus-visible {
+            outline: none !important;
+            box-shadow: none !important;
+            border-color: rgba(255,255,255,0.06) !important;
+          }
+          .oc-hint {font-size:12px;color:rgba(230,238,248,0.6)}
+          .oc-actions {display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px}
+          .oc-btn {
+            appearance:none;border:0;padding:10px 14px;border-radius:10px;color:#00121a;font-weight:700;cursor:pointer;
+            background:linear-gradient(90deg,#00e0ff,#8b5cff);box-shadow:0 6px 18px rgba(139,92,255,0.12),0 2px 6px rgba(0,0,0,0.5);
+            transition:transform .12s ease,box-shadow .12s ease,opacity .12s ease;
+          }
+          .oc-btn:active{transform:translateY(1px)}
+          .oc-btn[disabled]{opacity:0.6;cursor:not-allowed}
+          .oc-ghost {background:transparent;border:1px solid rgba(255,255,255,0.04);color:rgba(230,238,248,0.85);padding:8px 12px;border-radius:8px}
+          .oc-error {color:#ff7b7b;font-size:13px;margin-top:4px}
+          .oc-footer {font-size:12px;color:rgba(230,238,248,0.55);margin-top:8px;text-align:center}
+          .w-full {width:100%}
+          input:focus-visible {outline: none;}
+        </style>
+
+        <div class="oc-login-shell">
+          <div class="oc-login-grid" aria-hidden="true"></div>
+          <div class="oc-login-card" role="dialog" aria-label="登录窗口">
+            <div class="oc-brand">
+              <div class="logo">OC</div>
+              <div>
+                <div class="oc-title">OPENCLAW 控制台</div>
+                <div class="oc-sub">请登录以继续 — 安全访问控制面板</div>
+              </div>
+            </div>
+
+            <div class="oc-field">
+              <label class="oc-hint">用户名</label>
+              <input
+                .value=${this.loginUsername}
+                @input=${(e: Event) => (this.loginUsername = (e.target as HTMLInputElement).value)}
+                placeholder="admin"
+                autocomplete="username"
+              />
+            </div>
+
+            <div class="oc-field">
+              <label class="oc-hint">密码</label>
+              <input
+                type="password"
+                .value=${this.loginPassword}
+                @input=${(e: Event) => (this.loginPassword = (e.target as HTMLInputElement).value)}
+                placeholder="请输入密码"
+                autocomplete="current-password"
+              />
+            </div>
+
+            ${this.loginError ? html`<div class="oc-error">${this.loginError}</div>` : nothing}
+
+            <div class="oc-actions">
+              <div style="display:flex;gap:8px;align-items:center">
+
+              </div>
+              <div style="display:flex;gap:8px" class="w-full">
+                <button class="oc-btn w-full" @click=${() => this.doLogin()} ?disabled=${this.loginLoading}>
+                  ${this.loginLoading ? "登录中…" : html`登录`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    return renderApp(this as unknown as AppViewState);
   }
 
   handleChatScroll(event: Event) {
@@ -613,9 +839,5 @@ export class OpenClawApp extends LitElement {
     const newRatio = Math.max(0.4, Math.min(0.7, ratio));
     this.splitRatio = newRatio;
     this.applySettings({ ...this.settings, splitRatio: newRatio });
-  }
-
-  render() {
-    return renderApp(this as unknown as AppViewState);
   }
 }
